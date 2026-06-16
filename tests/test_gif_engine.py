@@ -1229,7 +1229,7 @@ def test_cli_rgba_file_roundtrip():
         j = json.loads(r2.stdout[json_start + len("--- JSON ---"):].strip())
         assert j["width"] == W and j["height"] == H
         assert j["num_frames"] == 3
-        assert j["loop_count"] == 0 or j["loop_count"] == "infinite"
+        assert j["loop_count"] == 0
         assert len(j["frames"]) == 3
         assert j["frames"][0]["delay_ms"] == 200
         assert j["frames"][0]["width"] == W and j["frames"][0]["height"] == H
@@ -1237,6 +1237,278 @@ def test_cli_rgba_file_roundtrip():
         print(f"  info JSON 一致: OK")
 
     print("CLI RGBA 文件往返测试通过!\n")
+
+
+def test_info_loop_display_distinction():
+    print("=== info 循环信息三种状态区分测试 ===")
+    import subprocess
+    import tempfile
+    import json
+
+    W, H = 2, 2
+
+    print("  --- 无限循环 (loop=0) ---")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "inf.gif")
+        cmd = [
+            sys.executable, "-m", "gif_engine", "make",
+            "--size", f"{W}x{H}", "--delay", "100", "--loop", "0",
+            "--frame", "solid:#FF0000", "--frame", "solid:#00FF00",
+            "-o", out,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+        assert r.returncode == 0, f"make 失败: {r.stderr}"
+
+        cmd2 = [sys.executable, "-m", "gif_engine", "info", out, "--json"]
+        r2 = subprocess.run(cmd2, capture_output=True, text=True, cwd=os.getcwd())
+        assert "无限循环" in r2.stdout, "终端输出应显示'无限循环'"
+        j_start = r2.stdout.find("--- JSON ---")
+        j = json.loads(r2.stdout[j_start + len("--- JSON ---"):].strip())
+        assert j["loop_count"] == 0, f"JSON loop_count 应为 0, 得 {j['loop_count']}"
+        assert j["loop_description"] == "无限循环", f"loop_description 错误: {j['loop_description']}"
+        print("    终端: 无限循环 | JSON: loop_count=0, description='无限循环': OK")
+
+    print("  --- 指定次数 (loop=3) ---")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "loop3.gif")
+        cmd = [
+            sys.executable, "-m", "gif_engine", "make",
+            "--size", f"{W}x{H}", "--delay", "100", "--loop", "3",
+            "--frame", "solid:#FF0000", "--frame", "solid:#00FF00",
+            "-o", out,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+        assert r.returncode == 0
+
+        cmd2 = [sys.executable, "-m", "gif_engine", "info", out, "--json"]
+        r2 = subprocess.run(cmd2, capture_output=True, text=True, cwd=os.getcwd())
+        assert "3 次" in r2.stdout, "终端输出应显示'3 次'"
+        j_start = r2.stdout.find("--- JSON ---")
+        j = json.loads(r2.stdout[j_start + len("--- JSON ---"):].strip())
+        assert j["loop_count"] == 3
+        assert j["loop_description"] == "3 次"
+        print("    终端: 3 次 | JSON: loop_count=3, description='3 次': OK")
+
+    print("  --- 无循环扩展 (单帧无NETSCAPE) ---")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "noloop.gif")
+        enc = GIFEncoder(width=W, height=H, loop_count=None)
+        enc.add_frame([(255, 0, 0, 255)] * (W * H), delay_ms=100)
+        enc.save(out)
+
+        cmd2 = [sys.executable, "-m", "gif_engine", "info", out, "--json"]
+        r2 = subprocess.run(cmd2, capture_output=True, text=True, cwd=os.getcwd())
+        assert "无循环扩展" in r2.stdout, "终端输出应显示'无循环扩展'"
+        assert "无限" not in r2.stdout.split("--- JSON ---")[0], "无循环扩展不能显示为无限"
+        j_start = r2.stdout.find("--- JSON ---")
+        j = json.loads(r2.stdout[j_start + len("--- JSON ---"):].strip())
+        assert j["loop_count"] is None, f"JSON loop_count 应为 null, 得 {j['loop_count']}"
+        assert "无循环扩展" in j["loop_description"]
+        print("    终端: 无循环扩展(播放一遍) | JSON: loop_count=null: OK")
+
+    print("info 循环信息区分测试通过!\n")
+
+
+def test_timeline_subcommand():
+    print("=== timeline 子命令测试 ===")
+    import subprocess
+    import tempfile
+    import json
+
+    W, H = 2, 2
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "anim.gif")
+        cmd = [
+            sys.executable, "-m", "gif_engine", "make",
+            "--size", f"{W}x{H}", "--delay", "100", "--loop", "0",
+            "--frame", "solid:#FF0000",
+            "--frame", "solid:#00FF00",
+            "--frame", "solid:#0000FF",
+            "-o", out,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+        assert r.returncode == 0
+
+        export_dir = os.path.join(tmpdir, "timeline_export")
+        cmd2 = [
+            sys.executable, "-m", "gif_engine", "timeline",
+            out,
+            "--time", "0", "--time", "50", "--time", "100",
+            "--time", "199", "--time", "200",
+            "--time", "299",
+            "--export-frames", export_dir,
+            "--json",
+        ]
+        r2 = subprocess.run(cmd2, capture_output=True, text=True, cwd=os.getcwd())
+        assert r2.returncode == 0, f"timeline 失败: {r2.stderr}\nSTDOUT:{r2.stdout}"
+
+        assert "帧号" in r2.stdout, "应输出帧号列"
+        assert "暂停" in r2.stdout or "播放中" in r2.stdout, "应输出状态列"
+
+        j_start = r2.stdout.find("--- JSON ---")
+        assert j_start >= 0, "未输出 JSON"
+        j = json.loads(r2.stdout[j_start + len("--- JSON ---"):].strip())
+        results = j["results"]
+        assert len(results) == 6, f"应去重后 6 个时间点, 得 {len(results)}"
+
+        checks = [
+            (0, 0, False),
+            (50, 0, False),
+            (100, 1, False),
+            (199, 1, False),
+            (200, 2, False),
+            (299, 2, False),
+        ]
+        for res, (t, expected_frame, expected_paused) in zip(results, checks):
+            assert res["frame_index"] == expected_frame, (
+                f"t={t}: frame={res['frame_index']} != {expected_frame}"
+            )
+            assert res["is_paused"] == expected_paused, (
+                f"t={t}: paused={res['is_paused']} != {expected_paused}"
+            )
+        print("  时间轴查询结果: OK")
+
+        for idx in [0, 1, 2]:
+            fpath = os.path.join(export_dir, f"frame_{idx:03d}.rgba")
+            assert os.path.exists(fpath), f"帧 {idx} 未导出"
+            assert os.path.getsize(fpath) == W * H * 4
+        print("  帧导出: OK")
+
+        manifest_path = os.path.join(export_dir, "manifest.json")
+        assert os.path.exists(manifest_path), "manifest.json 未生成"
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        assert manifest["gif_width"] == W and manifest["gif_height"] == H
+        assert manifest["loop_count"] == 0
+        assert len(manifest["exported_frames"]) == 3
+        assert "timeline_results" in manifest
+        assert manifest["exported_frames"][0]["disposal_code"] == 1
+        print("  manifest.json: OK")
+
+    print("timeline 子命令测试通过!\n")
+
+
+def test_make_per_frame_params():
+    print("=== make 每帧独立参数测试 ===")
+    import subprocess
+    import tempfile
+
+    W, H = 16, 16
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "perframe.gif")
+        cmd = [
+            sys.executable, "-m", "gif_engine", "make",
+            "--size", f"{W}x{H}", "--loop", "0",
+            "--frame", "solid:#FF0000,delay=200,disposal=1",
+            "--frame", "solid:#00FF00,delay=300,disposal=2,left=4,top=4,size=8x8",
+            "--frame", "solid:#0000FF,delay=100,disposal=3,left=8,top=8,size=4x4",
+            "-o", out,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+        assert r.returncode == 0, f"make 失败: {r.stderr}\nSTDOUT:{r.stdout}"
+        assert os.path.exists(out)
+        print(f"  make 成功, {os.path.getsize(out)} bytes")
+
+        from gif_engine import GIFDecoder, GIFRenderer
+        gif = GIFDecoder.from_file(out)
+        assert len(gif.frames) == 3
+
+        f0 = gif.frames[0]
+        assert f0.delay_time * 10 == 200, f"帧0延迟: {f0.delay_time * 10}"
+        assert f0.disposal_method == 1
+        assert f0.left == 0 and f0.top == 0
+        assert f0.width == W and f0.height == H
+        print(f"  帧0: delay=200ms, disposal=1, pos=(0,0), size={W}x{H}: OK")
+
+        f1 = gif.frames[1]
+        assert f1.delay_time * 10 == 300, f"帧1延迟: {f1.delay_time * 10}"
+        assert f1.disposal_method == 2
+        assert f1.left == 4 and f1.top == 4
+        assert f1.width == 8 and f1.height == 8
+        print(f"  帧1: delay=300ms, disposal=2, pos=(4,4), size=8x8: OK")
+
+        f2 = gif.frames[2]
+        assert f2.delay_time * 10 == 100, f"帧2延迟: {f2.delay_time * 10}"
+        assert f2.disposal_method == 3
+        assert f2.left == 8 and f2.top == 8
+        assert f2.width == 4 and f2.height == 4
+        print(f"  帧2: delay=100ms, disposal=3, pos=(8,8), size=4x4: OK")
+
+        renderer = GIFRenderer(gif)
+        rf0 = renderer.render_frame(0)
+        rf1 = renderer.render_frame(1)
+        rf2 = renderer.render_frame(2)
+        assert rf0.rgba_data[0][:3] == (255, 0, 0)
+        assert rf1.rgba_data[4 * W + 4][:3] == (0, 255, 0)
+        assert rf2.rgba_data[8 * W + 8][:3] == (0, 0, 255)
+        print("  渲染颜色验证: OK")
+
+    print("make 每帧独立参数测试通过!\n")
+
+
+def test_manifest_on_export():
+    print("=== manifest.json 生成测试 ===")
+    import subprocess
+    import tempfile
+    import json
+
+    W, H = 4, 4
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "test.gif")
+        cmd = [
+            sys.executable, "-m", "gif_engine", "make",
+            "--size", f"{W}x{H}", "--delay", "150", "--loop", "2",
+            "--disposal", "2",
+            "--frame", "solid:#FF0000",
+            "--frame", "checker:#00FF00",
+            "-o", out,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+        assert r.returncode == 0
+
+        export_dir = os.path.join(tmpdir, "export")
+        cmd2 = [
+            sys.executable, "-m", "gif_engine", "info",
+            out, "--export-frames", export_dir,
+        ]
+        r2 = subprocess.run(cmd2, capture_output=True, text=True, cwd=os.getcwd())
+        assert r2.returncode == 0
+
+        manifest_path = os.path.join(export_dir, "manifest.json")
+        assert os.path.exists(manifest_path), "manifest.json 未生成"
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            m = json.load(f)
+
+        assert m["gif_width"] == W
+        assert m["gif_height"] == H
+        assert m["num_frames"] == 2
+        assert m["total_duration_ms"] == 300
+        assert m["loop_count"] == 2
+        assert "2 次" in m["loop_description"]
+        assert len(m["frames"]) == 2
+
+        for i, fm in enumerate(m["frames"]):
+            assert fm["index"] == i
+            assert fm["filename"] == f"frame_{i:03d}.rgba"
+            assert fm["width"] == W
+            assert fm["height"] == H
+            assert fm["file_size"] == W * H * 4
+            assert fm["delay_ms"] == 150
+            assert fm["disposal"] == "RESTORE_TO_BACKGROUND"
+            assert fm["disposal_code"] == 2
+            assert fm["left"] == 0
+            assert fm["top"] == 0
+            assert fm["frame_width"] == W
+            assert fm["frame_height"] == H
+
+            rgba_path = os.path.join(export_dir, fm["filename"])
+            assert os.path.exists(rgba_path)
+            assert os.path.getsize(rgba_path) == fm["file_size"]
+
+        print(f"  manifest 结构正确, 2 帧全部字段匹配: OK")
+        print(f"  rgba 文件大小与 manifest 一致: OK")
+
+    print("manifest.json 生成测试通过!\n")
 
 
 def main():
@@ -1265,6 +1537,10 @@ def main():
         test_import_and_basic_entrypoints()
         test_timeline_no_loop_extension()
         test_cli_rgba_file_roundtrip()
+        test_info_loop_display_distinction()
+        test_timeline_subcommand()
+        test_make_per_frame_params()
+        test_manifest_on_export()
 
         print("=" * 60)
         print("所有测试通过! 生成的文件:")
