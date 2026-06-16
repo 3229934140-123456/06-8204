@@ -8,12 +8,14 @@ from .structures import (
     CommentExtension,
     GIFFrame,
     GIFImage,
+    Block,
+    BlockType,
 )
 from .lzw import lzw_decode, lzw_encode
 from .decoder import GIFDecoder
 from .encoder import GIFEncoder
 from .quantizer import quantize_image, median_cut_quantize
-from .renderer import GIFRenderer, DisposalMethod
+from .renderer import GIFRenderer, DisposalMethod, TimeInfo
 
 __all__ = [
     "GIFSignature",
@@ -25,6 +27,8 @@ __all__ = [
     "CommentExtension",
     "GIFFrame",
     "GIFImage",
+    "Block",
+    "BlockType",
     "lzw_decode",
     "lzw_encode",
     "GIFDecoder",
@@ -33,4 +37,5 @@ __all__ = [
     "median_cut_quantize",
     "GIFRenderer",
     "DisposalMethod",
+    "TimeInfo",
 ]

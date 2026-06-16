@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 import struct
 
 
@@ -322,6 +322,7 @@ class GIFImage:
     frames: List[GIFFrame] = field(default_factory=list)
     application_extensions: List[ApplicationExtension] = field(default_factory=list)
     comment_extensions: List[CommentExtension] = field(default_factory=list)
+    blocks: List[Block] = field(default_factory=list)
 
     @property
     def width(self) -> int:
@@ -346,3 +347,25 @@ class GIFImage:
         if self.global_color_table is not None:
             return self.global_color_table
         raise ValueError("No color table available for frame")
+
+    def rebuild_blocks_from_frames(self) -> None:
+        self.blocks = []
+        for ext in self.application_extensions:
+            self.blocks.append(Block(type=BlockType.APPLICATION_EXTENSION, data=ext))
+        for ext in self.comment_extensions:
+            self.blocks.append(Block(type=BlockType.COMMENT_EXTENSION, data=ext))
+        for i, frame in enumerate(self.frames):
+            self.blocks.append(Block(type=BlockType.FRAME, data=frame, index=i))
+
+
+class BlockType:
+    APPLICATION_EXTENSION = "application"
+    COMMENT_EXTENSION = "comment"
+    FRAME = "frame"
+
+
+@dataclass
+class Block:
+    type: str
+    data: Union["ApplicationExtension", "CommentExtension", "GIFFrame"]
+    index: int = -1

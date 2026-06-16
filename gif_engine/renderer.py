@@ -11,6 +11,24 @@ class DisposalMethod(IntEnum):
     RESTORE_TO_PREVIOUS = 3
 
 
+class TimeInfo:
+    def __init__(
+        self,
+        frame_index: int,
+        frame_start_ms: int,
+        frame_end_ms: int,
+        elapsed_in_frame_ms: int,
+        loop_count: int,
+        is_paused: bool,
+    ):
+        self.frame_index = frame_index
+        self.frame_start_ms = frame_start_ms
+        self.frame_end_ms = frame_end_ms
+        self.elapsed_in_frame_ms = elapsed_in_frame_ms
+        self.loop_count = loop_count
+        self.is_paused = is_paused
+
+
 class RenderedFrame:
     def __init__(
         self,
@@ -126,7 +144,7 @@ class GIFRenderer:
         if frame_idx > 0:
             prev_frame = self.gif.frames[frame_idx - 1]
             if prev_frame.disposal_method == DisposalMethod.RESTORE_TO_PREVIOUS:
-                pass
+                self._restore_saved_canvas()
             elif prev_frame.disposal_method == DisposalMethod.RESTORE_TO_BACKGROUND:
                 self._clear_frame_area(prev_frame)
 
@@ -172,3 +190,86 @@ class GIFRenderer:
     @property
     def num_frames(self) -> int:
         return len(self.gif.frames)
+
+    @property
+    def total_duration_ms(self) -> int:
+        total = 0
+        for frame in self.gif.frames:
+            delay = frame.delay_time * 10
+            if delay == 0:
+                delay = 100
+            total += delay
+        return total
+
+    @property
+    def frame_durations_ms(self) -> List[int]:
+        durations = []
+        for frame in self.gif.frames:
+            delay = frame.delay_time * 10
+            if delay == 0:
+                delay = 100
+            durations.append(delay)
+        return durations
+
+    def get_time_info(self, timestamp_ms: int) -> TimeInfo:
+        if not self.gif.frames:
+            raise ValueError("No frames in GIF")
+
+        total_dur = self.total_duration_ms
+        durations = self.frame_durations_ms
+        num_frames = len(self.gif.frames)
+
+        loop_count = self.gif.loop_count
+        if loop_count == 0:
+            effective_timestamp = timestamp_ms % total_dur if total_dur > 0 else 0
+            loop = timestamp_ms // total_dur if total_dur > 0 else 0
+            is_paused = False
+        else:
+            max_total = total_dur * loop_count if total_dur > 0 else 0
+            if timestamp_ms >= max_total and max_total > 0:
+                return TimeInfo(
+                    frame_index=num_frames - 1,
+                    frame_start_ms=max_total - durations[-1],
+                    frame_end_ms=max_total,
+                    elapsed_in_frame_ms=durations[-1],
+                    loop_count=loop_count - 1,
+                    is_paused=True,
+                )
+            effective_timestamp = timestamp_ms % total_dur if total_dur > 0 else 0
+            loop = timestamp_ms // total_dur if total_dur > 0 else 0
+            is_paused = False
+
+        elapsed = 0
+        for i, dur in enumerate(durations):
+            if effective_timestamp < elapsed + dur:
+                return TimeInfo(
+                    frame_index=i,
+                    frame_start_ms=loop * total_dur + elapsed,
+                    frame_end_ms=loop * total_dur + elapsed + dur,
+                    elapsed_in_frame_ms=effective_timestamp - elapsed,
+                    loop_count=loop,
+                    is_paused=is_paused,
+                )
+            elapsed += dur
+
+        return TimeInfo(
+            frame_index=num_frames - 1,
+            frame_start_ms=(loop + 1) * total_dur - durations[-1],
+            frame_end_ms=(loop + 1) * total_dur,
+            elapsed_in_frame_ms=durations[-1],
+            loop_count=loop,
+            is_paused=is_paused,
+        )
+
+    def get_frame_at_time(self, timestamp_ms: int) -> int:
+        return self.get_time_info(timestamp_ms).frame_index
+
+    def render_at_time_ms(self, timestamp_ms: int) -> Tuple[RenderedFrame, TimeInfo]:
+        info = self.get_time_info(timestamp_ms)
+        target_frame = info.frame_index
+
+        self._initialize_canvas()
+        for i in range(target_frame + 1):
+            rendered = self.render_frame(i)
+
+        return rendered, info

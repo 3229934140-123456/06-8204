@@ -668,6 +668,356 @@ def test_roundtrip_boundary_integration():
     print("综合边界测试通过!\n")
 
 
+def test_timeline_rendering():
+    print("=== 时间轴渲染测试 ===")
+    W, H = 2, 2
+    delays = [100, 200, 300]
+    colors = [
+        (255, 0, 0, 255),
+        (0, 255, 0, 255),
+        (0, 0, 255, 255),
+    ]
+
+    print("  --- 无限循环 (loop=0) ---")
+    encoder = GIFEncoder(width=W, height=H, loop_count=0)
+    for color, delay in zip(colors, delays):
+        encoder.add_frame([color] * (W * H), delay_ms=delay)
+    data = encoder.get_bytes()
+    gif = GIFDecoder.from_bytes(data)
+    renderer = GIFRenderer(gif)
+
+    assert renderer.total_duration_ms == sum(delays), (
+        f"总时长错误: {renderer.total_duration_ms} != {sum(delays)}"
+    )
+    assert renderer.frame_durations_ms == delays, "帧延迟列表错误"
+
+    time_points = [
+        (0, 0, 0, colors[0][:3]),
+        (50, 0, 50, colors[0][:3]),
+        (99, 0, 99, colors[0][:3]),
+        (100, 1, 0, colors[1][:3]),
+        (200, 1, 100, colors[1][:3]),
+        (299, 1, 199, colors[1][:3]),
+        (300, 2, 0, colors[2][:3]),
+        (599, 2, 299, colors[2][:3]),
+        (600, 0, 0, colors[0][:3]),
+        (700, 1, 0, colors[1][:3]),
+        (1200, 0, 0, colors[0][:3]),
+        (1499, 1, 199, colors[1][:3]),
+        (1500, 2, 0, colors[2][:3]),
+        (1799, 2, 299, colors[2][:3]),
+        (1800, 0, 0, colors[0][:3]),
+    ]
+    for t, expected_frame, expected_elapsed, expected_color in time_points:
+        info = renderer.get_time_info(t)
+        assert info.frame_index == expected_frame, (
+            f"t={t}ms: 帧={info.frame_index} != 预期{expected_frame}"
+        )
+        assert info.elapsed_in_frame_ms == expected_elapsed, (
+            f"t={t}ms: 帧内耗时={info.elapsed_in_frame_ms} != 预期{expected_elapsed}"
+        )
+        assert info.loop_count == t // 600, (
+            f"t={t}ms: 循环次数={info.loop_count}"
+        )
+        assert not info.is_paused, f"t={t}ms: 无限循环不应暂停"
+
+        rf, info2 = renderer.render_at_time_ms(t)
+        assert info2.frame_index == expected_frame
+        assert rf.rgba_data[0][:3] == expected_color, (
+            f"t={t}ms: 颜色={rf.rgba_data[0][:3]} != {expected_color}"
+        )
+    print("  无限循环时间轴: OK")
+
+    print("  --- 有限循环 (loop=2, 播放2遍后停在最后帧) ---")
+    encoder2 = GIFEncoder(width=W, height=H, loop_count=2)
+    for color, delay in zip(colors, delays):
+        encoder2.add_frame([color] * (W * H), delay_ms=delay)
+    data2 = encoder2.get_bytes()
+    gif2 = GIFDecoder.from_bytes(data2)
+    renderer2 = GIFRenderer(gif2)
+
+    assert gif2.loop_count == 2, f"循环次数错误: {gif2.loop_count}"
+
+    max_time = sum(delays) * 2
+    time_points2 = [
+        (0, 0, False, colors[0][:3]),
+        (599, 2, False, colors[2][:3]),
+        (600, 0, False, colors[0][:3]),
+        (1199, 2, False, colors[2][:3]),
+        (1200, 2, True, colors[2][:3]),
+        (2000, 2, True, colors[2][:3]),
+        (9999, 2, True, colors[2][:3]),
+    ]
+    for t, expected_frame, expected_paused, expected_color in time_points2:
+        info = renderer2.get_time_info(t)
+        assert info.frame_index == expected_frame, (
+            f"t={t}ms: 帧={info.frame_index} != 预期{expected_frame}"
+        )
+        assert info.is_paused == expected_paused, (
+            f"t={t}ms: paused={info.is_paused} != 预期{expected_paused}"
+        )
+        rf, _ = renderer2.render_at_time_ms(t)
+        assert rf.rgba_data[0][:3] == expected_color
+    print("  有限循环+暂停最后帧: OK")
+
+    print("  --- 帧索引查询 ---")
+    for t, expected_frame, _, _ in time_points[:10]:
+        got = renderer.get_frame_at_time(t)
+        assert got == expected_frame, f"get_frame_at_time({t})={got} != {expected_frame}"
+    print("  get_frame_at_time: OK")
+
+    print("时间轴渲染测试通过!\n")
+
+
+def test_extensions_roundtrip():
+    print("=== 扩展信息往返测试 ===")
+    W, H = 4, 4
+    red = (255, 0, 0, 255)
+    blue = (0, 0, 255, 255)
+
+    encoder = GIFEncoder(width=W, height=H, loop_count=3)
+    encoder.add_comment("First comment - test ASCII")
+    encoder.add_comment("Second comment with ASCII: !@#$%")
+    encoder.add_application_extension(
+        "XMP Data",
+        b"\x01\x02\x03",
+        b"custom app data",
+    )
+    encoder.add_frame([red] * (W * H), delay_ms=100)
+    encoder.add_frame([blue] * (W * H), delay_ms=200)
+
+    data = encoder.get_bytes()
+    print(f"  编码大小: {len(data)} bytes")
+
+    gif = GIFDecoder.from_bytes(data)
+
+    assert len(gif.comment_extensions) == 2, f"注释数: {len(gif.comment_extensions)} != 2"
+    assert gif.comment_extensions[0].comment == "First comment - test ASCII"
+    assert gif.comment_extensions[1].comment == "Second comment with ASCII: !@#$%"
+    print("  注释块保留: OK")
+
+    assert len(gif.application_extensions) == 2, (
+        f"应用扩展数: {len(gif.application_extensions)} != 2"
+    )
+    netscape_exts = [e for e in gif.application_extensions if e.is_netscape_looping]
+    assert len(netscape_exts) == 1, "NETSCAPE 循环扩展丢失"
+    assert netscape_exts[0].loop_count == 3, (
+        f"循环次数: {netscape_exts[0].loop_count} != 3"
+    )
+
+    custom_exts = [e for e in gif.application_extensions if not e.is_netscape_looping]
+    assert len(custom_exts) == 1, "自定义应用扩展丢失"
+    assert custom_exts[0].application_identifier == "XMP Data"
+    assert custom_exts[0].authentication_code == b"\x01\x02\x03"
+    assert custom_exts[0].data == b"custom app data"
+    print("  应用扩展保留: OK")
+
+    assert gif.loop_count == 3, f"GIFImage.loop_count: {gif.loop_count} != 3"
+    print("  loop_count 属性: OK")
+
+    assert len(gif.blocks) == 6, f"块数: {len(gif.blocks)} != 6 (2应用+2注释+2帧)"
+    block_types = [b.type for b in gif.blocks]
+    from gif_engine import BlockType
+    expected_types = [
+        BlockType.APPLICATION_EXTENSION,
+        BlockType.APPLICATION_EXTENSION,
+        BlockType.COMMENT_EXTENSION,
+        BlockType.COMMENT_EXTENSION,
+        BlockType.FRAME,
+        BlockType.FRAME,
+    ]
+    assert block_types == expected_types, (
+        f"块顺序: {block_types} != {expected_types}"
+    )
+    print("  块顺序保留: OK")
+
+    print("  --- 重新编码一致性 ---")
+    data2 = GIFEncoder.from_gif_image(gif)
+    gif2 = GIFDecoder.from_bytes(data2)
+    assert len(gif2.comment_extensions) == 2
+    assert len(gif2.application_extensions) == 2
+    assert gif2.loop_count == 3
+    assert len(gif2.frames) == 2
+    renderer = GIFRenderer(gif2)
+    assert renderer.render_frame(0).rgba_data[0][:3] == (255, 0, 0)
+    assert renderer.render_frame(1).rgba_data[0][:3] == (0, 0, 255)
+    print("  decode->encode->decode 往返一致: OK")
+
+    print("扩展信息往返测试通过!\n")
+
+
+def test_disposal_restore_to_previous_local_area():
+    print("=== RestoreToPrevious 局部区域/透明补牢测试 ===")
+    W, H = 8, 8
+    bg = (0, 0, 255, 255)
+    red = (255, 0, 0, 255)
+    green = (0, 255, 0, 255)
+    trans = (0, 0, 0, 0)
+
+    print("  --- 场景1: 帧2只画1个像素, 帧1的红方块应消失 ---")
+    encoder = GIFEncoder(width=W, height=H)
+    frame0 = [bg] * (W * H)
+    encoder.add_frame(frame0, delay_ms=10, disposal_method=DisposalMethod.DO_NOT_DISPOSE)
+
+    frame1 = [bg] * (W * H)
+    for y in range(2, 6):
+        for x in range(2, 6):
+            frame1[y * W + x] = red
+    encoder.add_frame(
+        frame1, delay_ms=10, disposal_method=DisposalMethod.RESTORE_TO_PREVIOUS
+    )
+
+    frame2 = [bg] * (W * H)
+    for y in range(H):
+        for x in range(W):
+            if not (x == 7 and y == 7):
+                frame2[y * W + x] = trans
+    frame2[7 * W + 7] = green
+    encoder.add_frame(frame2, delay_ms=10, disposal_method=DisposalMethod.NO_DISPOSAL)
+
+    data = encoder.get_bytes()
+    gif = GIFDecoder.from_bytes(data)
+    renderer = GIFRenderer(gif)
+
+    r0 = renderer.render_frame(0)
+    assert r0.rgba_data[0] == bg, "帧0背景错误"
+
+    r1 = renderer.render_frame(1)
+    assert r1.rgba_data[3 * W + 3] == red, "帧1红方块未绘制"
+    assert r1.rgba_data[2 * W + 2] == red, "帧1红方块未绘制"
+    print("    帧1红方块: OK")
+
+    r2 = renderer.render_frame(2)
+    assert r2.rgba_data[3 * W + 3] == bg, (
+        f"帧2 (3,3) 应为背景色, 实际{r2.rgba_data[3 * W + 3]}"
+    )
+    assert r2.rgba_data[2 * W + 2] == bg, (
+        f"帧2 (2,2) 应为背景色, 实际{r2.rgba_data[2 * W + 2]}"
+    )
+    assert r2.rgba_data[7 * W + 7] == green, "帧2 (7,7) 应为绿色"
+    assert r2.rgba_data[7 * W + 6] == bg, "帧2 (6,7) 应为背景色(透明像素不覆盖)"
+    print("    帧2红方块消失+仅1个绿像素: OK")
+
+    print("  --- 场景2: 帧2只更新局部矩形, 帧1临时内容不残留 ---")
+    renderer.reset()
+    r0b = renderer.render_frame(0)
+    r1b = renderer.render_frame(1)
+    r2b = renderer.render_frame(2)
+    for i in range(W * H):
+        expected = frame2[i]
+        got = r2b.rgba_data[i]
+        if expected[3] == 0:
+            if got == bg:
+                continue
+            assert got[3] == 0, f"idx {i}: 透明位置不应有残留 {got}"
+        else:
+            assert got[:3] == expected[:3], f"idx {i}: 颜色不匹配"
+    print("    逐像素验证无残留: OK")
+
+    print("  --- 场景3: 帧2使用 left/top 只画子区域 ---")
+    encoder3 = GIFEncoder(width=W, height=H)
+    encoder3.add_frame(frame0, delay_ms=10, disposal_method=DisposalMethod.DO_NOT_DISPOSE)
+    encoder3.add_frame(
+        frame1, delay_ms=10, disposal_method=DisposalMethod.RESTORE_TO_PREVIOUS
+    )
+
+    small_green = [green] * (2 * 2)
+    encoder3.add_frame(
+        small_green, frame_width=2, frame_height=2, left=6, top=6,
+        delay_ms=10, disposal_method=DisposalMethod.NO_DISPOSAL,
+    )
+
+    data3 = encoder3.get_bytes()
+    gif3 = GIFDecoder.from_bytes(data3)
+    renderer3 = GIFRenderer(gif3)
+
+    renderer3.render_frame(0)
+    renderer3.render_frame(1)
+    r_final = renderer3.render_frame(2)
+
+    assert r_final.rgba_data[3 * W + 3] == bg, (
+        f"子区域模式帧2 (3,3) 应为背景色, 实际{r_final.rgba_data[3 * W + 3]}"
+    )
+    assert r_final.rgba_data[2 * W + 2] == bg, (
+        f"子区域模式帧2 (2,2) 应为背景色, 实际{r_final.rgba_data[2 * W + 2]}"
+    )
+    assert r_final.rgba_data[6 * W + 6] == green, "帧2 (6,6) 应为绿色"
+    assert r_final.rgba_data[7 * W + 7] == green, "帧2 (7,7) 应为绿色"
+    print("    子区域(left/top)模式无残留: OK")
+
+    print("RestoreToPrevious 局部区域补牢测试通过!\n")
+
+
+def test_cli_basic():
+    print("=== CLI 工具测试 ===")
+    import subprocess
+    import tempfile
+    import json
+
+    W, H = 4, 4
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_gif = os.path.join(tmpdir, "test_cli.gif")
+        cmd = [
+            sys.executable, "-m", "gif_engine", "make",
+            "--size", f"{W}x{H}",
+            "--delay", "150",
+            "--loop", "2",
+            "--comment", "test comment 1",
+            "--comment", "test comment 2",
+            "--frame", "solid:#FF0000",
+            "--frame", "checker:#00FF00",
+            "--frame", "border:#0000FF",
+            "-o", test_gif,
+        ]
+        print(f"  运行 make 命令...")
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+        assert result.returncode == 0, f"make 失败: {result.stderr}"
+        assert os.path.exists(test_gif), "make 未生成文件"
+        size = os.path.getsize(test_gif)
+        assert size > 0, "生成文件为空"
+        print(f"    make 成功, {size} bytes")
+
+        cmd_info = [
+            sys.executable, "-m", "gif_engine", "info",
+            test_gif,
+            "--json",
+        ]
+        print(f"  运行 info 命令...")
+        result2 = subprocess.run(cmd_info, capture_output=True, text=True, cwd=os.getcwd())
+        assert result2.returncode == 0, f"info 失败: {result2.stderr}"
+
+        json_start = result2.stdout.find("--- JSON ---")
+        if json_start >= 0:
+            json_str = result2.stdout[json_start + len("--- JSON ---"):].strip()
+            data = json.loads(json_str)
+            assert data["width"] == W
+            assert data["height"] == H
+            assert data["num_frames"] == 3
+            assert data["loop_count"] == 2
+            assert data["num_comments"] == 2
+            assert len(data["frames"]) == 3
+            assert data["frames"][0]["delay_ms"] == 150
+            print(f"    info JSON 输出: OK")
+        else:
+            raise AssertionError("info 未输出 JSON")
+
+        export_dir = os.path.join(tmpdir, "export")
+        cmd_export = [
+            sys.executable, "-m", "gif_engine", "info",
+            test_gif,
+            "--export-frames", export_dir,
+        ]
+        result3 = subprocess.run(cmd_export, capture_output=True, text=True, cwd=os.getcwd())
+        assert result3.returncode == 0, f"export 失败: {result3.stderr}"
+        for i in range(3):
+            frame_file = os.path.join(export_dir, f"frame_{i:03d}.rgba")
+            assert os.path.exists(frame_file), f"帧 {i} 未导出"
+            assert os.path.getsize(frame_file) == W * H * 4, f"帧 {i} 大小错误"
+        print(f"    帧导出: OK")
+
+    print("CLI 工具测试通过!\n")
+
+
 def main():
     print("=" * 60)
     print("GIF 编解码引擎测试套件")
@@ -687,6 +1037,10 @@ def main():
         test_color_frame_switch_consistency()
         test_disposal_restore_to_previous()
         test_roundtrip_boundary_integration()
+        test_timeline_rendering()
+        test_extensions_roundtrip()
+        test_disposal_restore_to_previous_local_area()
+        test_cli_basic()
 
         print("=" * 60)
         print("所有测试通过! 生成的文件:")

@@ -8,8 +8,11 @@ from .structures import (
     GraphicControlExtension,
     ImageDescriptor,
     ApplicationExtension,
+    CommentExtension,
     GIFFrame,
     GIFImage,
+    Block,
+    BlockType,
 )
 from .lzw import lzw_encode
 from .quantizer import quantize_image, interlace_indices
@@ -20,6 +23,7 @@ IMAGE_DESCRIPTOR_SEPARATOR = 0x2C
 TRAILER = 0x3B
 LABEL_GRAPHIC_CONTROL = 0xF9
 LABEL_APPLICATION = 0xFF
+LABEL_COMMENT = 0xFE
 
 
 class GIFEncoder:
@@ -36,9 +40,28 @@ class GIFEncoder:
         self.background_color_index = background_color_index
         self.global_color_table: Optional[ColorTable] = None
         self._frames: List[dict] = []
+        self._comments: List[str] = []
+        self._app_extensions: List[ApplicationExtension] = []
 
     def set_global_color_table(self, color_table: ColorTable) -> None:
         self.global_color_table = color_table
+
+    def add_comment(self, comment: str) -> None:
+        self._comments.append(comment)
+
+    def add_application_extension(
+        self,
+        identifier: str,
+        auth_code: bytes,
+        data: bytes,
+    ) -> None:
+        self._app_extensions.append(
+            ApplicationExtension(
+                application_identifier=identifier,
+                authentication_code=auth_code,
+                data=data,
+            )
+        )
 
     def add_frame(
         self,
@@ -120,6 +143,12 @@ class GIFEncoder:
             )
             gif.application_extensions.append(app_ext)
 
+        for ext in self._app_extensions:
+            gif.application_extensions.append(ext)
+
+        for comment_text in self._comments:
+            gif.comment_extensions.append(CommentExtension(comment=comment_text))
+
         for frame_info in self._frames:
             use_local = frame_info["use_local_palette"] or not has_gct
             ct = frame_info["color_table"]
@@ -158,6 +187,7 @@ class GIFEncoder:
             )
             gif.frames.append(frame)
 
+        gif.rebuild_blocks_from_frames()
         return gif
 
     def encode(self) -> bytes:
@@ -178,43 +208,75 @@ class GIFEncoder:
         if gif.global_color_table is not None:
             result.extend(gif.global_color_table.to_bytes())
 
-        for ext in gif.application_extensions:
-            result.append(EXTENSION_INTRODUCER)
-            result.append(LABEL_APPLICATION)
-            result.append(11)
-            app_id_bytes = ext.application_identifier.encode("ascii")[:8]
-            app_id_bytes = app_id_bytes.ljust(8, b"\x00")
-            result.extend(app_id_bytes)
-            auth_bytes = ext.authentication_code[:3]
-            auth_bytes = auth_bytes.ljust(3, b"\x00")
-            result.extend(auth_bytes)
-            self._write_sub_blocks(result, ext.data)
-
-        for frame in gif.frames:
-            if frame.graphic_control_extension is not None:
-                result.append(EXTENSION_INTRODUCER)
-                result.append(LABEL_GRAPHIC_CONTROL)
-                result.append(4)
-                result.extend(frame.graphic_control_extension.to_bytes())
-                result.append(0)
-
-            result.append(IMAGE_DESCRIPTOR_SEPARATOR)
-            result.extend(frame.image_descriptor.to_bytes())
-
-            if frame.local_color_table is not None:
-                result.extend(frame.local_color_table.to_bytes())
-
-            effective_ct = gif.get_effective_color_table(gif.frames.index(frame))
-            lzw_min_code_size = max(2, effective_ct.size_code + 1)
-            if lzw_min_code_size < 2:
-                lzw_min_code_size = 2
-
-            compressed = lzw_encode(frame.pixel_indices, lzw_min_code_size)
-            result.append(lzw_min_code_size)
-            self._write_sub_blocks(result, compressed)
+        if gif.blocks:
+            frame_idx = 0
+            for block in gif.blocks:
+                if block.type == BlockType.APPLICATION_EXTENSION:
+                    self._write_application_extension(result, block.data)
+                elif block.type == BlockType.COMMENT_EXTENSION:
+                    self._write_comment_extension(result, block.data)
+                elif block.type == BlockType.FRAME:
+                    self._write_frame(result, gif, block.data, block.index)
+                    frame_idx += 1
+        else:
+            for ext in gif.application_extensions:
+                self._write_application_extension(result, ext)
+            for ext in gif.comment_extensions:
+                self._write_comment_extension(result, ext)
+            for frame_idx, frame in enumerate(gif.frames):
+                self._write_frame(result, gif, frame, frame_idx)
 
         result.append(TRAILER)
         return bytes(result)
+
+    def _write_application_extension(
+        self, buffer: bytearray, ext: ApplicationExtension
+    ) -> None:
+        buffer.append(EXTENSION_INTRODUCER)
+        buffer.append(LABEL_APPLICATION)
+        buffer.append(11)
+        app_id_bytes = ext.application_identifier.encode("ascii")[:8]
+        app_id_bytes = app_id_bytes.ljust(8, b"\x00")
+        buffer.extend(app_id_bytes)
+        auth_bytes = ext.authentication_code[:3]
+        auth_bytes = auth_bytes.ljust(3, b"\x00")
+        buffer.extend(auth_bytes)
+        self._write_sub_blocks(buffer, ext.data)
+
+    def _write_comment_extension(
+        self, buffer: bytearray, ext: CommentExtension
+    ) -> None:
+        buffer.append(EXTENSION_INTRODUCER)
+        buffer.append(LABEL_COMMENT)
+        comment_bytes = ext.comment.encode("latin-1", errors="replace")
+        self._write_sub_blocks(buffer, comment_bytes)
+
+    def _write_frame(
+        self,
+        buffer: bytearray,
+        gif: GIFImage,
+        frame: GIFFrame,
+        frame_idx: int,
+    ) -> None:
+        if frame.graphic_control_extension is not None:
+            buffer.append(EXTENSION_INTRODUCER)
+            buffer.append(LABEL_GRAPHIC_CONTROL)
+            buffer.append(4)
+            buffer.extend(frame.graphic_control_extension.to_bytes())
+            buffer.append(0)
+
+        buffer.append(IMAGE_DESCRIPTOR_SEPARATOR)
+        buffer.extend(frame.image_descriptor.to_bytes())
+
+        if frame.local_color_table is not None:
+            buffer.extend(frame.local_color_table.to_bytes())
+
+        effective_ct = gif.get_effective_color_table(frame_idx)
+        lzw_min_code_size = max(2, effective_ct.size_code + 1)
+
+        compressed = lzw_encode(frame.pixel_indices, lzw_min_code_size)
+        buffer.append(lzw_min_code_size)
+        self._write_sub_blocks(buffer, compressed)
 
     @staticmethod
     def _write_sub_blocks(buffer: bytearray, data: bytes) -> None:
@@ -236,52 +298,5 @@ class GIFEncoder:
 
     @staticmethod
     def from_gif_image(gif: GIFImage) -> bytes:
-        result = bytearray()
-
-        result.extend(gif.signature.to_bytes())
-        result.extend(gif.logical_screen.to_bytes())
-
-        if gif.global_color_table is not None:
-            result.extend(gif.global_color_table.to_bytes())
-
-        for ext in gif.application_extensions:
-            result.append(EXTENSION_INTRODUCER)
-            result.append(LABEL_APPLICATION)
-            result.append(11)
-            app_id_bytes = ext.application_identifier.encode("ascii")[:8]
-            app_id_bytes = app_id_bytes.ljust(8, b"\x00")
-            result.extend(app_id_bytes)
-            auth_bytes = ext.authentication_code[:3]
-            auth_bytes = auth_bytes.ljust(3, b"\x00")
-            result.extend(auth_bytes)
-            GIFEncoder._write_sub_blocks(result, ext.data)
-
-        for ext in gif.comment_extensions:
-            result.append(EXTENSION_INTRODUCER)
-            result.append(0xFE)
-            comment_bytes = ext.comment.encode("latin-1")
-            GIFEncoder._write_sub_blocks(result, comment_bytes)
-
-        for frame_idx, frame in enumerate(gif.frames):
-            if frame.graphic_control_extension is not None:
-                result.append(EXTENSION_INTRODUCER)
-                result.append(LABEL_GRAPHIC_CONTROL)
-                result.append(4)
-                result.extend(frame.graphic_control_extension.to_bytes())
-                result.append(0)
-
-            result.append(IMAGE_DESCRIPTOR_SEPARATOR)
-            result.extend(frame.image_descriptor.to_bytes())
-
-            if frame.local_color_table is not None:
-                result.extend(frame.local_color_table.to_bytes())
-
-            effective_ct = gif.get_effective_color_table(frame_idx)
-            lzw_min_code_size = max(2, effective_ct.size_code + 1)
-
-            compressed = lzw_encode(frame.pixel_indices, lzw_min_code_size)
-            result.append(lzw_min_code_size)
-            GIFEncoder._write_sub_blocks(result, compressed)
-
-        result.append(TRAILER)
-        return bytes(result)
+        enc = GIFEncoder()
+        return enc._encode_gif_image(gif)

@@ -12,6 +12,8 @@ from .structures import (
     CommentExtension,
     GIFFrame,
     GIFImage,
+    Block,
+    BlockType,
 )
 from .lzw import lzw_decode
 from .quantizer import deinterlace_indices
@@ -65,9 +67,15 @@ class GIFDecoder:
                 elif label == LABEL_APPLICATION:
                     app_ext = self._decode_application_extension()
                     result.application_extensions.append(app_ext)
+                    result.blocks.append(
+                        Block(type=BlockType.APPLICATION_EXTENSION, data=app_ext)
+                    )
                 elif label == LABEL_COMMENT:
                     comment_ext = self._decode_comment_extension()
                     result.comment_extensions.append(comment_ext)
+                    result.blocks.append(
+                        Block(type=BlockType.COMMENT_EXTENSION, data=comment_ext)
+                    )
                 elif label == LABEL_PLAIN_TEXT:
                     self._skip_sub_blocks()
                 else:
@@ -75,6 +83,9 @@ class GIFDecoder:
             elif block_type == IMAGE_DESCRIPTOR_SEPARATOR:
                 frame = self._decode_image_descriptor_and_data(pending_gce)
                 result.frames.append(frame)
+                result.blocks.append(
+                    Block(type=BlockType.FRAME, data=frame, index=len(result.frames) - 1)
+                )
                 pending_gce = None
             else:
                 raise ValueError(
