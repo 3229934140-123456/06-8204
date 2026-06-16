@@ -434,6 +434,240 @@ def test_disposal_methods():
     print("处置方法测试通过!\n")
 
 
+def test_edge_solid_1x1():
+    print("=== 边界测试: 1x1 单色图 ===")
+    colors = [
+        (255, 0, 0, 255),
+        (0, 255, 0, 255),
+        (0, 0, 255, 255),
+        (255, 255, 255, 255),
+        (0, 0, 0, 255),
+        (123, 45, 67, 255),
+    ]
+    for rgba in colors:
+        encoder = GIFEncoder(width=1, height=1)
+        encoder.add_frame([rgba], delay_ms=50)
+        data = encoder.get_bytes()
+        gif = GIFDecoder.from_bytes(data)
+        assert gif.width == 1 and gif.height == 1, "尺寸错误"
+        assert len(gif.frames) == 1, "帧数错误"
+        renderer = GIFRenderer(gif)
+        rf = renderer.render_frame(0)
+        got = rf.rgba_data[0]
+        assert got[:3] == rgba[:3], f"颜色不匹配: 预期 {rgba[:3]}, 得到 {got[:3]}"
+        assert got[3] == 255, "不透明度错误"
+    print(f"  {len(colors)} 种 1x1 单色往返: OK")
+
+    print("1x1 单色图测试通过!\n")
+
+
+def test_edge_fully_transparent():
+    print("=== 边界测试: 整帧全透明 ===")
+    for W, H in [(1, 1), (2, 2), (5, 3)]:
+        pix = [(0, 0, 0, 0)] * (W * H)
+        encoder = GIFEncoder(width=W, height=H)
+        encoder.add_frame(pix, delay_ms=50)
+        data = encoder.get_bytes()
+        gif = GIFDecoder.from_bytes(data)
+        assert gif.width == W and gif.height == H
+        f = gif.frames[0]
+        assert f.has_transparency, "应标记透明色"
+        assert f.transparent_index == 0, f"透明索引应为0, 得{f.transparent_index}"
+        renderer = GIFRenderer(gif)
+        rf = renderer.render_frame(0)
+        assert all(c[3] == 0 for c in rf.rgba_data), "渲染后不是全透明"
+    print(f"  {len([(1,1),(2,2),(5,3)])} 种尺寸全透明往返: OK")
+
+    print("整帧全透明测试通过!\n")
+
+
+def test_edge_single_opacity_with_transparent():
+    print("=== 边界测试: 1种不透明色 + 透明 ===")
+    W, H = 4, 4
+    solid = (200, 100, 50, 255)
+    pix = []
+    for i in range(W * H):
+        if i % 2 == 0:
+            pix.append(solid)
+        else:
+            pix.append((0, 0, 0, 0))
+
+    encoder = GIFEncoder(width=W, height=H)
+    encoder.add_frame(pix, delay_ms=50)
+    data = encoder.get_bytes()
+    gif = GIFDecoder.from_bytes(data)
+    f = gif.frames[0]
+    assert f.has_transparency, "应有透明色标记"
+    ct = gif.get_effective_color_table(0)
+    print(f"  调色板大小: {len(ct)}")
+
+    renderer = GIFRenderer(gif)
+    rf = renderer.render_frame(0)
+    for i in range(W * H):
+        got = rf.rgba_data[i]
+        expected = pix[i]
+        if expected[3] == 0:
+            assert got[3] == 0, f"idx {i} 应透明"
+        else:
+            assert got[:3] == solid[:3], f"idx {i} 颜色错误: {got[:3]} != {solid[:3]}"
+            assert got[3] == 255
+    print("  棋盘格式透明+单色往返: OK")
+
+    print("单色+透明测试通过!\n")
+
+
+def test_color_frame_switch_consistency():
+    print("=== 边界测试: 多帧颜色切换准确性 ===")
+    W, H = 3, 3
+    frame_colors = [
+        (255, 0, 0, 255),
+        (0, 0, 255, 255),
+        (0, 255, 0, 255),
+        (255, 255, 0, 255),
+        (255, 0, 255, 255),
+        (0, 255, 255, 255),
+    ]
+    encoder = GIFEncoder(width=W, height=H, loop_count=3)
+    for color in frame_colors:
+        encoder.add_frame([color] * (W*H), delay_ms=60)
+    data = encoder.get_bytes()
+    print(f"  编码大小: {len(data)} bytes")
+
+    gif = GIFDecoder.from_bytes(data)
+    assert len(gif.frames) == len(frame_colors), "帧数不匹配"
+    assert gif.loop_count == 3, f"循环次数错误: {gif.loop_count}"
+
+    renderer = GIFRenderer(gif)
+    for i, expected_color in enumerate(frame_colors):
+        rf = renderer.render_frame(i)
+        f = gif.frames[i]
+        assert rf.width == W and rf.height == H
+        sample = rf.rgba_data[0]
+        assert sample[:3] == expected_color[:3], (
+            f"Frame {i} 颜色不匹配: 预期 {expected_color[:3]}, 得 {sample[:3]}"
+        )
+        delay = f.delay_time * 10
+        assert 50 <= delay <= 70, f"Frame {i} 延迟错误: {delay}"
+        assert f.left == 0 and f.top == 0
+        assert f.width == W and f.height == H
+        if f.local_color_table:
+            print(f"  Frame {i}: 使用局部调色板 ({len(f.local_color_table)}色)")
+    print(f"  {len(frame_colors)} 帧颜色往返一致: OK")
+
+    print("多帧颜色切换测试通过!\n")
+
+
+def test_disposal_restore_to_previous():
+    print("=== 边界测试: 处置方法3 RestoreToPrevious ===")
+    W, H = 6, 6
+    bg = (0, 0, 255, 255)
+    red = (255, 0, 0, 255)
+    green = (0, 255, 0, 255)
+
+    encoder = GIFEncoder(width=W, height=H)
+    frame0 = [bg] * (W*H)
+    encoder.add_frame(frame0, delay_ms=10, disposal_method=DisposalMethod.DO_NOT_DISPOSE)
+
+    frame1 = [bg] * (W*H)
+    for y in range(0, 2):
+        for x in range(0, 2):
+            frame1[y*W + x] = red
+    encoder.add_frame(
+        frame1, delay_ms=10,
+        disposal_method=DisposalMethod.RESTORE_TO_PREVIOUS,
+    )
+
+    frame2 = [bg] * (W*H)
+    for y in range(H-2, H):
+        for x in range(W-2, W):
+            frame2[y*W + x] = green
+    encoder.add_frame(frame2, delay_ms=10, disposal_method=DisposalMethod.NO_DISPOSAL)
+
+    data = encoder.get_bytes()
+    gif = GIFDecoder.from_bytes(data)
+    assert len(gif.frames) == 3
+    assert gif.frames[1].disposal_method == DisposalMethod.RESTORE_TO_PREVIOUS
+
+    renderer = GIFRenderer(gif)
+    r0 = renderer.render_frame(0)
+    assert r0.rgba_data[0] == bg, "帧0背景错误"
+
+    r1 = renderer.render_frame(1)
+    assert r1.rgba_data[0] == red, "帧1左上应为红色"
+    assert r1.rgba_data[1*W + 1] == red, "帧1(1,1)应为红色"
+    print("  帧1红方块绘制: OK")
+
+    r2 = renderer.render_frame(2)
+    assert r2.rgba_data[0] == bg, (
+        f"处置后(0,0)应恢复背景色, 实际{r2.rgba_data[0]}"
+    )
+    assert r2.rgba_data[1*W + 1] == bg, "处置后(1,1)应恢复背景色"
+    assert r2.rgba_data[(H-1)*W + (W-1)] == green, "帧2右下应为绿色"
+    assert r2.rgba_data[(H-2)*W + (W-2)] == green, "帧2(4,4)应为绿色"
+    print("  帧2红方块消失+绿方块出现: OK")
+
+    renderer.reset()
+    r0_again = renderer.render_frame(0)
+    r1_again = renderer.render_frame(1)
+    r2_again = renderer.render_frame(2)
+    assert r0_again.rgba_data == r0.rgba_data
+    assert r1_again.rgba_data == r1.rgba_data
+    assert r2_again.rgba_data == r2.rgba_data
+    print("  重置后重新渲染一致: OK")
+
+    print("处置方法 RestoreToPrevious 测试通过!\n")
+
+
+def test_roundtrip_boundary_integration():
+    print("=== 综合边界: 混合场景往返 ===")
+    W, H = 5, 5
+    encoder = GIFEncoder(width=W, height=H, loop_count=5)
+
+    red = (255, 0, 0, 255)
+    blue = (0, 0, 255, 255)
+    green = (0, 255, 0, 255)
+    trans = (0, 0, 0, 0)
+
+    frames_data = [
+        ([red] * (W*H), DisposalMethod.RESTORE_TO_BACKGROUND, 100),
+        ([trans, blue, trans, blue, trans] * H, DisposalMethod.RESTORE_TO_PREVIOUS, 80),
+        ([green] * (W*H), DisposalMethod.DO_NOT_DISPOSE, 120),
+    ]
+    expected_colors = [
+        lambda px: all(p[:3] == (255,0,0) and p[3]==255 for p in px),
+        lambda px: all(
+            (px[i][3]==0 if (i % W) % 2 == 0 else (px[i][:3]==(0,0,255) and px[i][3]==255))
+            for i in range(W*H)
+        ),
+        lambda px: all(p[:3] == (0,255,0) and p[3]==255 for p in px),
+    ]
+
+    for pixels, disp, delay in frames_data:
+        encoder.add_frame(pixels, delay_ms=delay, disposal_method=disp)
+    data = encoder.get_bytes()
+    print(f"  编码大小: {len(data)} bytes")
+
+    gif = GIFDecoder.from_bytes(data)
+    assert gif.width == W and gif.height == H
+    assert len(gif.frames) == len(frames_data)
+    assert gif.loop_count == 5
+
+    for i, (pixels, disp, delay) in enumerate(frames_data):
+        f = gif.frames[i]
+        assert f.disposal_method == disp, f"Frame{i} disp mismatch"
+        assert abs(f.delay_time * 10 - delay) <= 10, (
+            f"Frame{i} delay mismatch: {f.delay_time*10} vs {delay}"
+        )
+
+    renderer = GIFRenderer(gif)
+    for i, check_fn in enumerate(expected_colors):
+        rf = renderer.render_frame(i)
+        assert check_fn(rf.rgba_data), f"Frame{i} 渲染内容错误"
+    print("  混合场景 3 帧往返: OK")
+
+    print("综合边界测试通过!\n")
+
+
 def main():
     print("=" * 60)
     print("GIF 编解码引擎测试套件")
@@ -447,6 +681,12 @@ def main():
         test_transparent_animation()
         test_roundtrip_frame_data()
         test_disposal_methods()
+        test_edge_solid_1x1()
+        test_edge_fully_transparent()
+        test_edge_single_opacity_with_transparent()
+        test_color_frame_switch_consistency()
+        test_disposal_restore_to_previous()
+        test_roundtrip_boundary_integration()
 
         print("=" * 60)
         print("所有测试通过! 生成的文件:")

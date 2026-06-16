@@ -116,7 +116,7 @@ class ColorTable:
     def pad_to_power_of_two(self) -> None:
         if not self.colors:
             self.colors = [(0, 0, 0)]
-        target = 1
+        target = 2
         while target < len(self.colors):
             target *= 2
         target = min(target, 256)
@@ -125,10 +125,9 @@ class ColorTable:
 
     @property
     def size_code(self) -> int:
+        self.pad_to_power_of_two()
         n = len(self.colors)
-        if n <= 2:
-            return 0
-        size = 1
+        size = 0
         while (1 << (size + 1)) < n:
             size += 1
         return min(size, 7)

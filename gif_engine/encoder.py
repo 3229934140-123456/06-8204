@@ -49,7 +49,7 @@ class GIFEncoder:
         top: int = 0,
         delay_ms: int = 100,
         disposal_method: int = 0,
-        use_local_palette: bool = False,
+        use_local_palette: bool = True,
         interlaced: bool = False,
         max_colors: int = 256,
     ) -> None:
@@ -86,9 +86,6 @@ class GIFEncoder:
             "use_local_palette": use_local_palette,
         }
         self._frames.append(frame_info)
-
-        if not use_local_palette and self.global_color_table is None:
-            self.global_color_table = color_table
 
     def _build_gif_image(self) -> GIFImage:
         gif = GIFImage()
