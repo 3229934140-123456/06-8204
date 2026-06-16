@@ -220,7 +220,20 @@ class GIFRenderer:
         num_frames = len(self.gif.frames)
 
         loop_count = self.gif.loop_count
-        if loop_count == 0:
+        if loop_count is None or loop_count == 1:
+            if timestamp_ms >= total_dur and total_dur > 0:
+                return TimeInfo(
+                    frame_index=num_frames - 1,
+                    frame_start_ms=total_dur - durations[-1],
+                    frame_end_ms=total_dur,
+                    elapsed_in_frame_ms=durations[-1],
+                    loop_count=0,
+                    is_paused=True,
+                )
+            effective_timestamp = timestamp_ms
+            loop = 0
+            is_paused = False
+        elif loop_count == 0:
             effective_timestamp = timestamp_ms % total_dur if total_dur > 0 else 0
             loop = timestamp_ms // total_dur if total_dur > 0 else 0
             is_paused = False

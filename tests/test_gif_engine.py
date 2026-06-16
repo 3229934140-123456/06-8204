@@ -1018,6 +1018,227 @@ def test_cli_basic():
     print("CLI 工具测试通过!\n")
 
 
+def test_import_and_basic_entrypoints():
+    print("=== 包导入与基础入口测试 ===")
+
+    import importlib
+    import subprocess
+
+    print("  --- import gif_engine ---")
+    import gif_engine as ge
+    required_symbols = [
+        "GIFDecoder", "GIFEncoder", "GIFRenderer",
+        "lzw_encode", "lzw_decode",
+        "DisposalMethod", "TimeInfo",
+        "quantize_image", "median_cut_quantize",
+    ]
+    for sym in required_symbols:
+        assert hasattr(ge, sym), f"缺少符号: {sym}"
+    print(f"  {len(required_symbols)} 个公开符号可访问: OK")
+
+    print("  --- python -c \"import gif_engine\" ---")
+    r = subprocess.run(
+        [sys.executable, "-c", "import gif_engine; print('OK')"],
+        capture_output=True, text=True, cwd=os.getcwd(),
+    )
+    assert r.returncode == 0, f"import 失败: {r.stderr}"
+    assert "OK" in r.stdout, f"输出异常: {r.stdout}"
+    print("  独立进程 import: OK")
+
+    print("  --- python -m gif_engine --help ---")
+    r = subprocess.run(
+        [sys.executable, "-m", "gif_engine", "--help"],
+        capture_output=True, text=True, cwd=os.getcwd(),
+    )
+    assert r.returncode == 0, f"--help 失败: {r.stderr}"
+    assert "info" in r.stdout and "make" in r.stdout
+    print("  -m 入口可用: OK")
+
+    print("  --- python -m gif_engine info (无参数, 应显示错误而非崩溃) ---")
+    r = subprocess.run(
+        [sys.executable, "-m", "gif_engine", "info"],
+        capture_output=True, text=True, cwd=os.getcwd(),
+    )
+    assert r.returncode != 0, "缺少参数应返回非 0"
+    print(f"  info 无参数退出码={r.returncode} (预期!=0): OK")
+
+    print("包导入与基础入口测试通过!\n")
+
+
+def test_timeline_no_loop_extension():
+    print("=== 时间轴: 无循环扩展普通 GIF 测试 ===")
+    W, H = 2, 2
+    delays = [100, 200, 150]
+    colors = [
+        (255, 0, 0, 255),
+        (0, 255, 0, 255),
+        (0, 0, 255, 255),
+    ]
+
+    encoder = GIFEncoder(width=W, height=H, loop_count=None)
+    for color, delay in zip(colors, delays):
+        encoder.add_frame([color] * (W * H), delay_ms=delay)
+    data = encoder.get_bytes()
+
+    gif = GIFDecoder.from_bytes(data)
+    assert gif.loop_count is None, f"loop_count 应为 None, 得 {gif.loop_count}"
+    print(f"  无循环扩展, loop_count=None: OK")
+
+    renderer = GIFRenderer(gif)
+    total = sum(delays)
+    assert renderer.total_duration_ms == total
+
+    print("  --- 正常时间范围内 ---")
+    time_points = [
+        (0, 0, False, colors[0][:3]),
+        (50, 0, False, colors[0][:3]),
+        (99, 0, False, colors[0][:3]),
+        (100, 1, False, colors[1][:3]),
+        (299, 1, False, colors[1][:3]),
+        (300, 2, False, colors[2][:3]),
+        (449, 2, False, colors[2][:3]),
+    ]
+    for t, expected_frame, expected_paused, expected_color in time_points:
+        info = renderer.get_time_info(t)
+        assert info.frame_index == expected_frame, (
+            f"t={t}: frame={info.frame_index} != {expected_frame}"
+        )
+        assert info.is_paused == expected_paused, (
+            f"t={t}: paused={info.is_paused} != {expected_paused}"
+        )
+        rf, _ = renderer.render_at_time_ms(t)
+        assert rf.rgba_data[0][:3] == expected_color, (
+            f"t={t}: color={rf.rgba_data[0][:3]} != {expected_color}"
+        )
+    print(f"  {len(time_points)} 个时间点: OK")
+
+    print("  --- 超过总时长后暂停在最后帧 ---")
+    over_times = [total, total + 1, total + 100, total + 9999]
+    for t in over_times:
+        info = renderer.get_time_info(t)
+        assert info.frame_index == 2, f"t={t}: frame={info.frame_index} != 2"
+        assert info.is_paused == True, f"t={t}: paused 应为 True"
+        rf, _ = renderer.render_at_time_ms(t)
+        assert rf.rgba_data[0][:3] == (0, 0, 255), f"t={t}: 颜色错误"
+    print(f"  超过总时长后暂停: OK")
+
+    print("  --- 对比 loop_count=1 行为一致 ---")
+    encoder1 = GIFEncoder(width=W, height=H, loop_count=1)
+    for color, delay in zip(colors, delays):
+        encoder1.add_frame([color] * (W * H), delay_ms=delay)
+    data1 = encoder1.get_bytes()
+    gif1 = GIFDecoder.from_bytes(data1)
+    assert gif1.loop_count == 1
+    renderer1 = GIFRenderer(gif1)
+    for t in [0, 50, 100, 300, 449, 450, 1000]:
+        info0 = renderer.get_time_info(t)
+        info1 = renderer1.get_time_info(t)
+        assert info0.frame_index == info1.frame_index, f"t={t}: frame 不一致"
+        assert info0.is_paused == info1.is_paused, f"t={t}: paused 不一致"
+    print("  loop_count=None 与 loop_count=1 行为一致: OK")
+
+    print("无循环扩展时间轴测试通过!\n")
+
+
+def test_cli_rgba_file_roundtrip():
+    print("=== CLI: RGBA 原始文件合成+导出往返测试 ===")
+    import subprocess
+    import tempfile
+
+    W, H = 4, 4
+    red = (255, 0, 0, 255)
+    blue = (0, 0, 255, 255)
+    green = (0, 255, 0, 255)
+    pixels0 = [red] * (W * H)
+    pixels1 = [green] * (W * H)
+    pixels2 = [blue if i % 2 == 0 else (0, 0, 0, 0) for i in range(W * H)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        paths = []
+        for idx, pixels in enumerate([pixels0, pixels1, pixels2]):
+            p = os.path.join(tmpdir, f"frame{idx}.rgba")
+            with open(p, "wb") as f:
+                for r, g, b, a in pixels:
+                    f.write(bytes([r, g, b, a]))
+            paths.append(p)
+
+        print(f"  写入 {len(paths)} 个 RGBA 文件")
+
+        out_gif = os.path.join(tmpdir, "from_rgba.gif")
+        cmd = [
+            sys.executable, "-m", "gif_engine", "make",
+            "--size", f"{W}x{H}",
+            "--delay", "200",
+            "--disposal", "2",
+            "--loop", "0",
+            "--frame", paths[0],
+            "--frame", paths[1],
+            "--frame", paths[2],
+            "-o", out_gif,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+        assert r.returncode == 0, f"make 失败: {r.stderr}\nSTDOUT:{r.stdout}"
+        assert os.path.exists(out_gif), f"未生成 {out_gif}"
+        print(f"  make 成功, {os.path.getsize(out_gif)} bytes: OK")
+
+        export_dir = os.path.join(tmpdir, "exported")
+        cmd_info = [
+            sys.executable, "-m", "gif_engine", "info",
+            out_gif,
+            "--export-frames", export_dir,
+            "--json",
+        ]
+        r2 = subprocess.run(cmd_info, capture_output=True, text=True, cwd=os.getcwd())
+        assert r2.returncode == 0, f"info+export 失败: {r2.stderr}\nSTDOUT:{r2.stdout}"
+
+        from gif_engine import GIFDecoder, GIFRenderer
+        gif_check = GIFDecoder.from_file(out_gif)
+        renderer_check = GIFRenderer(gif_check)
+
+        for i in range(3):
+            exported_path = os.path.join(export_dir, f"frame_{i:03d}.rgba")
+            assert os.path.exists(exported_path), f"未导出 {exported_path}"
+            size = os.path.getsize(exported_path)
+            expected_size = W * H * 4
+            assert size == expected_size, (
+                f"frame{i} 大小 {size} != 预期 {expected_size}"
+            )
+
+            with open(exported_path, "rb") as f:
+                raw = f.read()
+            got_pixels = []
+            for j in range(0, len(raw), 4):
+                got_pixels.append((raw[j], raw[j+1], raw[j+2], raw[j+3]))
+
+            renderer_check.reset()
+            rendered = None
+            for k in range(i + 1):
+                rendered = renderer_check.render_frame(k)
+            expected_rendered = rendered.rgba_data
+
+            match_count = sum(1 for g, e in zip(got_pixels, expected_rendered) if g == e)
+            assert match_count == W * H, (
+                f"frame{i} {match_count}/{W*H} 像素匹配渲染结果"
+            )
+            print(f"  帧 {i}: {match_count}/{W*H} 像素匹配 (文件大小={size} bytes): OK")
+
+        print(f"  info JSON 验证...")
+        import json
+        json_start = r2.stdout.find("--- JSON ---")
+        assert json_start >= 0, "未输出 JSON"
+        j = json.loads(r2.stdout[json_start + len("--- JSON ---"):].strip())
+        assert j["width"] == W and j["height"] == H
+        assert j["num_frames"] == 3
+        assert j["loop_count"] == 0 or j["loop_count"] == "infinite"
+        assert len(j["frames"]) == 3
+        assert j["frames"][0]["delay_ms"] == 200
+        assert j["frames"][0]["width"] == W and j["frames"][0]["height"] == H
+        assert j["frames"][0]["disposal"] == "RESTORE_TO_BACKGROUND"
+        print(f"  info JSON 一致: OK")
+
+    print("CLI RGBA 文件往返测试通过!\n")
+
+
 def main():
     print("=" * 60)
     print("GIF 编解码引擎测试套件")
@@ -1041,6 +1262,9 @@ def main():
         test_extensions_roundtrip()
         test_disposal_restore_to_previous_local_area()
         test_cli_basic()
+        test_import_and_basic_entrypoints()
+        test_timeline_no_loop_extension()
+        test_cli_rgba_file_roundtrip()
 
         print("=" * 60)
         print("所有测试通过! 生成的文件:")

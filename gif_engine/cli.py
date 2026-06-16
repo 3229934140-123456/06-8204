@@ -207,32 +207,34 @@ def cmd_make(args: argparse.Namespace) -> int:
             encoder.add_comment(c)
 
     for frame_def in args.frames:
-        if ":" in frame_def:
-            pattern, color_str = frame_def.rsplit(":", 1)
-        else:
-            pattern, color_str = "solid", frame_def
-
-        try:
-            color = _parse_color(color_str)
-        except ValueError as e:
-            print(f"错误: {e}", file=sys.stderr)
-            return 1
-
         if os.path.exists(frame_def):
             with open(frame_def, "rb") as f:
                 raw = f.read()
             expected = width * height * 4
             if len(raw) != expected:
                 print(
-                    f"错误: 文件 {frame_def} 大小 {len(raw)} != 期望 {expected} (${width}x{height} RGBA)",
+                    f"错误: 文件 {frame_def} 大小 {len(raw)} != 期望 {expected} ({width}x{height} RGBA)",
                     file=sys.stderr,
                 )
                 return 1
             pixels = []
             for i in range(0, len(raw), 4):
                 pixels.append((raw[i], raw[i + 1], raw[i + 2], raw[i + 3]))
+            print(f"  添加帧: {frame_def} ({len(pixels)} 像素, {width}x{height})")
         else:
+            if ":" in frame_def:
+                pattern, color_str = frame_def.rsplit(":", 1)
+            else:
+                pattern, color_str = "solid", frame_def
+
+            try:
+                color = _parse_color(color_str)
+            except ValueError as e:
+                print(f"错误: {e}", file=sys.stderr)
+                return 1
+
             pixels = _make_test_pattern(pattern, width, height, color)
+            print(f"  添加帧: {pattern} {color_str} ({len(pixels)} 像素)")
 
         encoder.add_frame(
             pixels,
@@ -241,7 +243,6 @@ def cmd_make(args: argparse.Namespace) -> int:
             use_local_palette=args.local_palette,
             interlaced=args.interlaced,
         )
-        print(f"  添加帧: {pattern} {color_str} ({len(pixels)} 像素)")
 
     encoder.save(output)
     size = os.path.getsize(output)
